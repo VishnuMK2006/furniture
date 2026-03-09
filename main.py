@@ -212,6 +212,9 @@ def create_product():
         products_collection = db.products
         result = products_collection.insert_one(new_product)
         new_product["id"] = str(result.inserted_id)
+        new_product.pop("_id", None)
+        if "created_at" in new_product:
+            new_product["created_at"] = new_product["created_at"].isoformat()
         
         print(f"DEBUG: Product created successfully: {new_product['id']}")
         return jsonify(new_product), 201
