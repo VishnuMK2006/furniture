@@ -11,6 +11,7 @@ from flask_jwt_extended import (
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from pymongo import MongoClient
+from bson import ObjectId
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
@@ -221,6 +222,27 @@ def create_product():
     except Exception as e:
         print(f"ERROR: Product creation failed: {str(e)}")
         return jsonify({"message": f"Server error: {str(e)}"}), 500
+
+
+@products_bp.route("/<product_id>", methods=["DELETE"])
+@jwt_required()
+def delete_product(product_id):
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Access forbidden: Admins only"}), 403
+
+    try:
+        oid = ObjectId(product_id)
+    except Exception:
+        return jsonify({"message": "Invalid product id"}), 400
+
+    products_collection = db.products
+    result = products_collection.delete_one({"_id": oid})
+
+    if result.deleted_count == 0:
+        return jsonify({"message": "Product not found"}), 404
+
+    return jsonify({"message": "Product deleted successfully"}), 200
 
 
 # ==========================================
