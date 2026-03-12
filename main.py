@@ -33,11 +33,39 @@ class Config:
 # ==========================================
 db = None
 
+DEFAULT_CATEGORIES = [
+    "Living Room",
+    "Bedroom",
+    "Dining",
+    "Office Furniture",
+]
+
 
 def init_db(app):
     global db
     client = MongoClient(app.config["MONGO_URI"])
     db = client["firstsample"]   # explicitly selecting database
+
+
+def ensure_default_categories():
+    categories_collection = db.categories
+    for name in DEFAULT_CATEGORIES:
+        categories_collection.update_one(
+            {"name": name},
+            {
+                "$setOnInsert": {
+                    "name": name,
+                    "created_at": datetime.datetime.utcnow(),
+                }
+            },
+            upsert=True,
+        )
+
+
+def require_admin_claims(claims):
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Access forbidden: Admins only"}), 403
+    return None
 
 
 # ==========================================
@@ -142,6 +170,47 @@ def admin_only():
 # ==========================================
 products_bp = Blueprint("products", __name__)
 
+
+def parse_product_payload(data, image_url=None):
+    # Helper to safely convert to int/float
+    def safe_int(val, default=0):
+        try:
+            return int(val) if val and str(val).strip() else default
+        except Exception:
+            return default
+
+    def safe_float(val, default=0.0):
+        try:
+            return float(val) if val and str(val).strip() else default
+        except Exception:
+            return default
+
+    categories_collection = db.categories
+    raw_category = (data.get("category") or "").strip()
+    if not raw_category:
+        return None, (jsonify({"message": "Category is required"}), 400)
+
+    existing_category = categories_collection.find_one({"name": raw_category})
+    if not existing_category:
+        return None, (jsonify({"message": "Invalid category. Create category first."}), 400)
+
+    parsed = {
+        "name": data.get("name", "Unnamed Product"),
+        "amountInStock": safe_int(data.get("amountInStock")),
+        "currentPrice": safe_float(data.get("currentPrice")),
+        "previousPrice": safe_float(data.get("previousPrice"), safe_float(data.get("currentPrice"))),
+        "deliveryPrice": safe_float(data.get("deliveryPrice")),
+        "deliveryInDays": safe_int(data.get("deliveryInDays", 7)),
+        "isAmazonChoice": data.get("isAmazonChoice", "false").lower() == "true",
+        "category": raw_category,
+        "sku": data.get("sku", ""),
+        "description": data.get("description", ""),
+        "imageUrl": image_url,
+        "model3DUrl": None,
+        "created_at": datetime.datetime.utcnow(),
+    }
+    return parsed, None
+
 @products_bp.route("/", methods=["GET"])
 def get_products():
     products_collection = db.products
@@ -161,9 +230,10 @@ def get_products():
 @jwt_required()
 def create_product():
     claims = get_jwt()
-    if claims.get("role") != "admin":
+    admin_error = require_admin_claims(claims)
+    if admin_error:
         print(f"DEBUG: Access denied for role: {claims.get('role')}")
-        return jsonify({"message": "Access forbidden: Admins only"}), 403
+        return admin_error
         
     data = request.form
     image = request.files.get("image")
@@ -181,34 +251,9 @@ def create_product():
             return jsonify({"message": f"Image upload failed: {str(e)}"}), 500
             
     try:
-        # Helper to safely convert to int/float
-        def safe_int(val, default=0):
-            try:
-                return int(val) if val and str(val).strip() else default
-            except:
-                return default
-        
-        def safe_float(val, default=0.0):
-            try:
-                return float(val) if val and str(val).strip() else default
-            except:
-                return default
-
-        new_product = {
-            "name": data.get("name", "Unnamed Product"),
-            "amountInStock": safe_int(data.get("amountInStock")),
-            "currentPrice": safe_float(data.get("currentPrice")),
-            "previousPrice": safe_float(data.get("previousPrice"), safe_float(data.get("currentPrice"))),
-            "deliveryPrice": safe_float(data.get("deliveryPrice")),
-            "deliveryInDays": safe_int(data.get("deliveryInDays", 7)),
-            "isAmazonChoice": data.get("isAmazonChoice", "false").lower() == "true",
-            "category": data.get("category", "Sofas"),
-            "sku": data.get("sku", ""),
-            "description": data.get("description", ""),
-            "imageUrl": image_url,
-            "model3DUrl": None,
-            "created_at": datetime.datetime.utcnow()
-        }
+        new_product, parse_error = parse_product_payload(data, image_url=image_url)
+        if parse_error:
+            return parse_error
         
         products_collection = db.products
         result = products_collection.insert_one(new_product)
@@ -228,8 +273,9 @@ def create_product():
 @jwt_required()
 def delete_product(product_id):
     claims = get_jwt()
-    if claims.get("role") != "admin":
-        return jsonify({"message": "Access forbidden: Admins only"}), 403
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
 
     try:
         oid = ObjectId(product_id)
@@ -243,6 +289,118 @@ def delete_product(product_id):
         return jsonify({"message": "Product not found"}), 404
 
     return jsonify({"message": "Product deleted successfully"}), 200
+
+
+# ==========================================
+# Blueprint: Categories
+# ==========================================
+categories_bp = Blueprint("categories", __name__)
+
+
+@categories_bp.route("/", methods=["GET"])
+def get_categories():
+    categories_collection = db.categories
+    categories = []
+    for category in categories_collection.find().sort("name", 1):
+        category["id"] = str(category.pop("_id"))
+        if "created_at" in category and hasattr(category["created_at"], "isoformat"):
+            category["created_at"] = category["created_at"].isoformat()
+        categories.append(category)
+    return jsonify(categories), 200
+
+
+@categories_bp.route("/", methods=["POST"])
+@jwt_required()
+def create_category():
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"message": "Category name is required"}), 400
+
+    categories_collection = db.categories
+    if categories_collection.find_one({"name": name}):
+        return jsonify({"message": "Category already exists"}), 400
+
+    new_category = {
+        "name": name,
+        "created_at": datetime.datetime.utcnow(),
+    }
+    result = categories_collection.insert_one(new_category)
+    return jsonify({
+        "id": str(result.inserted_id),
+        "name": name,
+        "created_at": new_category["created_at"].isoformat(),
+    }), 201
+
+
+@categories_bp.route("/<category_id>", methods=["PUT"])
+@jwt_required()
+def update_category(category_id):
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    data = request.get_json() or {}
+    new_name = (data.get("name") or "").strip()
+    if not new_name:
+        return jsonify({"message": "Category name is required"}), 400
+
+    try:
+        oid = ObjectId(category_id)
+    except Exception:
+        return jsonify({"message": "Invalid category id"}), 400
+
+    categories_collection = db.categories
+    existing = categories_collection.find_one({"_id": oid})
+    if not existing:
+        return jsonify({"message": "Category not found"}), 404
+
+    duplicate = categories_collection.find_one({"name": new_name, "_id": {"$ne": oid}})
+    if duplicate:
+        return jsonify({"message": "Another category with this name already exists"}), 400
+
+    categories_collection.update_one({"_id": oid}, {"$set": {"name": new_name}})
+    db.products.update_many(
+        {"category": existing["name"]},
+        {"$set": {"category": new_name}},
+    )
+
+    return jsonify({"id": category_id, "name": new_name}), 200
+
+
+@categories_bp.route("/<category_id>", methods=["DELETE"])
+@jwt_required()
+def delete_category(category_id):
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    try:
+        oid = ObjectId(category_id)
+    except Exception:
+        return jsonify({"message": "Invalid category id"}), 400
+
+    categories_collection = db.categories
+    existing = categories_collection.find_one({"_id": oid})
+    if not existing:
+        return jsonify({"message": "Category not found"}), 404
+
+    products_using_category = db.products.count_documents({"category": existing["name"]})
+    if products_using_category > 0:
+        return jsonify({
+            "message": "Category is in use by products. Reassign products before deleting.",
+            "products_using_category": products_using_category,
+        }), 400
+
+    categories_collection.delete_one({"_id": oid})
+    return jsonify({"message": "Category deleted successfully"}), 200
 
 
 # ==========================================
@@ -264,10 +422,12 @@ def create_app(config_class=Config):
 
     # Database
     init_db(app)
+    ensure_default_categories()
 
     # Blueprints
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(products_bp, url_prefix="/api/products")
+    app.register_blueprint(categories_bp, url_prefix="/api/categories")
 
     @app.route("/health", methods=["GET"])
     def health_check():
