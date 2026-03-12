@@ -40,6 +40,14 @@ DEFAULT_CATEGORIES = [
     "Office Furniture",
 ]
 
+ORDER_STATUSES = [
+    "Pending",
+    "Confirmed",
+    "Shipped",
+    "Delivered",
+    "Cancelled",
+]
+
 
 def init_db(app):
     global db
@@ -66,6 +74,79 @@ def require_admin_claims(claims):
     if claims.get("role") != "admin":
         return jsonify({"message": "Access forbidden: Admins only"}), 403
     return None
+
+
+def serialize_order(order):
+    serialized = dict(order)
+    serialized["id"] = str(serialized.pop("_id"))
+    if "customer" in serialized and "id" in serialized["customer"]:
+        serialized["customer"]["id"] = str(serialized["customer"]["id"])
+    if "created_at" in serialized and hasattr(serialized["created_at"], "isoformat"):
+        serialized["created_at"] = serialized["created_at"].isoformat()
+    if "updated_at" in serialized and hasattr(serialized["updated_at"], "isoformat"):
+        serialized["updated_at"] = serialized["updated_at"].isoformat()
+    return serialized
+
+
+def ensure_sample_orders():
+    orders_collection = db.orders
+    if orders_collection.count_documents({}) > 0:
+        return
+
+    products_collection = db.products
+    sample_products = list(products_collection.find().limit(2))
+    if not sample_products:
+        return
+
+    order_items = []
+    for idx, product in enumerate(sample_products):
+        quantity = 1 if idx == 0 else 2
+        unit_price = float(product.get("currentPrice", 0))
+        order_items.append({
+            "productId": str(product.get("_id")),
+            "name": product.get("name", "Unknown Item"),
+            "imageUrl": product.get("imageUrl"),
+            "quantity": quantity,
+            "unitPrice": unit_price,
+            "totalPrice": round(unit_price * quantity, 2),
+        })
+
+    subtotal = round(sum(item["totalPrice"] for item in order_items), 2)
+    shipping = 0.0
+    total = round(subtotal + shipping, 2)
+
+    sample_order = {
+        "customer": {
+            "id": "demo-user-001",
+            "name": "Vishnu Kumar",
+            "email": "vishnu@example.com",
+            "phone": "+91 98765 43210",
+        },
+        "items": order_items,
+        "payment": {
+            "method": "UPI",
+            "status": "Paid",
+            "transactionRef": "TXN-DEMO-1001",
+        },
+        "deliveryAddress": {
+            "line1": "42 MG Road",
+            "line2": "Near City Mall",
+            "city": "Bengaluru",
+            "state": "Karnataka",
+            "postalCode": "560001",
+            "country": "India",
+        },
+        "pricing": {
+            "subtotal": subtotal,
+            "shipping": shipping,
+            "total": total,
+        },
+        "status": "Pending",
+        "created_at": datetime.datetime.utcnow(),
+        "updated_at": datetime.datetime.utcnow(),
+    }
+
+    orders_collection.insert_one(sample_order)
 
 
 # ==========================================
@@ -404,6 +485,90 @@ def delete_category(category_id):
 
 
 # ==========================================
+# Blueprint: Orders
+# ==========================================
+orders_bp = Blueprint("orders", __name__)
+
+
+@orders_bp.route("/", methods=["GET"])
+@jwt_required()
+def get_orders():
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    status = request.args.get("status")
+    query = {}
+    if status and status in ORDER_STATUSES:
+        query["status"] = status
+
+    orders_collection = db.orders
+    orders = [serialize_order(order) for order in orders_collection.find(query).sort("created_at", -1)]
+    return jsonify(orders), 200
+
+
+@orders_bp.route("/<order_id>", methods=["GET"])
+@jwt_required()
+def get_order_by_id(order_id):
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    try:
+        oid = ObjectId(order_id)
+    except Exception:
+        return jsonify({"message": "Invalid order id"}), 400
+
+    orders_collection = db.orders
+    order = orders_collection.find_one({"_id": oid})
+    if not order:
+        return jsonify({"message": "Order not found"}), 404
+
+    return jsonify(serialize_order(order)), 200
+
+
+@orders_bp.route("/<order_id>/status", methods=["PATCH"])
+@jwt_required()
+def update_order_status(order_id):
+    claims = get_jwt()
+    admin_error = require_admin_claims(claims)
+    if admin_error:
+        return admin_error
+
+    try:
+        oid = ObjectId(order_id)
+    except Exception:
+        return jsonify({"message": "Invalid order id"}), 400
+
+    data = request.get_json() or {}
+    new_status = (data.get("status") or "").strip()
+    if new_status not in ORDER_STATUSES:
+        return jsonify({
+            "message": "Invalid order status",
+            "allowed_statuses": ORDER_STATUSES,
+        }), 400
+
+    orders_collection = db.orders
+    result = orders_collection.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "status": new_status,
+                "updated_at": datetime.datetime.utcnow(),
+            }
+        },
+    )
+
+    if result.matched_count == 0:
+        return jsonify({"message": "Order not found"}), 404
+
+    updated_order = orders_collection.find_one({"_id": oid})
+    return jsonify(serialize_order(updated_order)), 200
+
+
+# ==========================================
 # Application Factory
 # ==========================================
 def create_app(config_class=Config):
@@ -423,11 +588,13 @@ def create_app(config_class=Config):
     # Database
     init_db(app)
     ensure_default_categories()
+    ensure_sample_orders()
 
     # Blueprints
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(products_bp, url_prefix="/api/products")
     app.register_blueprint(categories_bp, url_prefix="/api/categories")
+    app.register_blueprint(orders_bp, url_prefix="/api/orders")
 
     @app.route("/health", methods=["GET"])
     def health_check():
