@@ -628,6 +628,237 @@ def update_order_status(order_id):
     return jsonify(serialize_order(updated)), 200
 
 
+profile_bp = Blueprint("profile", __name__)
+
+
+PROFILE_DEFAULTS = {
+    "personal": {
+        "fullName": "",
+        "phone": "",
+        "dateOfBirth": "",
+        "gender": "",
+    },
+    "addresses": [],
+    "paymentMethods": [],
+    "wishlist": [],
+    "notifications": {
+        "orderUpdates": True,
+        "promotions": True,
+        "restockAlerts": True,
+        "wishlistDrops": True,
+    },
+    "settings": {
+        "biometricLogin": False,
+        "darkMode": False,
+        "language": "English",
+    },
+    "supportTickets": [],
+    "returnRequests": [],
+}
+
+
+def get_current_user_doc():
+    user_id = get_jwt_identity()
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        return None, None, (jsonify({"message": "Invalid user identity"}), 400)
+
+    user = db.users.find_one({"_id": oid})
+    if not user:
+        return None, None, (jsonify({"message": "User not found"}), 404)
+
+    return user, oid, None
+
+
+def read_profile_data(user):
+    profile = user.get("profile") or {}
+    return {
+        "personal": profile.get("personal") or dict(PROFILE_DEFAULTS["personal"]),
+        "addresses": profile.get("addresses") or [],
+        "paymentMethods": profile.get("paymentMethods") or [],
+        "wishlist": profile.get("wishlist") or [],
+        "notifications": profile.get("notifications") or dict(PROFILE_DEFAULTS["notifications"]),
+        "settings": profile.get("settings") or dict(PROFILE_DEFAULTS["settings"]),
+        "supportTickets": profile.get("supportTickets") or [],
+        "returnRequests": profile.get("returnRequests") or [],
+    }
+
+
+def write_profile_field(oid, field_name, value):
+    db.users.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                f"profile.{field_name}": value,
+                "updated_at": datetime.datetime.utcnow(),
+            }
+        },
+    )
+
+
+@profile_bp.route("/", methods=["GET"])
+@jwt_required()
+def get_profile():
+    user, _, error = get_current_user_doc()
+    if error:
+        return error
+
+    profile = read_profile_data(user)
+    return jsonify(profile), 200
+
+
+@profile_bp.route("/personal", methods=["GET", "PUT"])
+@jwt_required()
+def personal_info():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["personal"]), 200
+
+    payload = request.get_json() or {}
+    if not isinstance(payload, dict):
+        return jsonify({"message": "Invalid personal info payload"}), 400
+
+    current = read_profile_data(user)["personal"]
+    merged = {
+        "fullName": payload.get("fullName", current.get("fullName", "")),
+        "phone": payload.get("phone", current.get("phone", "")),
+        "dateOfBirth": payload.get("dateOfBirth", current.get("dateOfBirth", "")),
+        "gender": payload.get("gender", current.get("gender", "")),
+    }
+    write_profile_field(oid, "personal", merged)
+    return jsonify(merged), 200
+
+
+@profile_bp.route("/addresses", methods=["GET", "PUT"])
+@jwt_required()
+def addresses():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["addresses"]), 200
+
+    payload = request.get_json() or []
+    if not isinstance(payload, list):
+        return jsonify({"message": "Addresses must be an array"}), 400
+
+    write_profile_field(oid, "addresses", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/payment-methods", methods=["GET", "PUT"])
+@jwt_required()
+def payment_methods():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["paymentMethods"]), 200
+
+    payload = request.get_json() or []
+    if not isinstance(payload, list):
+        return jsonify({"message": "Payment methods must be an array"}), 400
+
+    write_profile_field(oid, "paymentMethods", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/wishlist", methods=["GET", "PUT"])
+@jwt_required()
+def wishlist():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["wishlist"]), 200
+
+    payload = request.get_json() or []
+    if not isinstance(payload, list):
+        return jsonify({"message": "Wishlist must be an array"}), 400
+
+    write_profile_field(oid, "wishlist", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/notifications", methods=["GET", "PUT"])
+@jwt_required()
+def notifications():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["notifications"]), 200
+
+    payload = request.get_json() or {}
+    if not isinstance(payload, dict):
+        return jsonify({"message": "Notifications payload must be an object"}), 400
+
+    write_profile_field(oid, "notifications", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/settings", methods=["GET", "PUT"])
+@jwt_required()
+def settings():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["settings"]), 200
+
+    payload = request.get_json() or {}
+    if not isinstance(payload, dict):
+        return jsonify({"message": "Settings payload must be an object"}), 400
+
+    write_profile_field(oid, "settings", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/support-tickets", methods=["GET", "PUT"])
+@jwt_required()
+def support_tickets():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["supportTickets"]), 200
+
+    payload = request.get_json() or []
+    if not isinstance(payload, list):
+        return jsonify({"message": "Support tickets must be an array"}), 400
+
+    write_profile_field(oid, "supportTickets", payload)
+    return jsonify(payload), 200
+
+
+@profile_bp.route("/returns", methods=["GET", "PUT"])
+@jwt_required()
+def returns():
+    user, oid, error = get_current_user_doc()
+    if error:
+        return error
+
+    if request.method == "GET":
+        return jsonify(read_profile_data(user)["returnRequests"]), 200
+
+    payload = request.get_json() or []
+    if not isinstance(payload, list):
+        return jsonify({"message": "Return requests must be an array"}), 400
+
+    write_profile_field(oid, "returnRequests", payload)
+    return jsonify(payload), 200
+
+
 inventory_bp = Blueprint("inventory", __name__)
 
 
@@ -734,6 +965,7 @@ def create_app(config_class=Config):
     app.register_blueprint(products_bp, url_prefix="/api/products")
     app.register_blueprint(categories_bp, url_prefix="/api/categories")
     app.register_blueprint(orders_bp, url_prefix="/api/orders")
+    app.register_blueprint(profile_bp, url_prefix="/api/profile")
     app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
 
     @app.route("/health", methods=["GET"])
