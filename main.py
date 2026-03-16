@@ -564,6 +564,22 @@ def create_order():
     return jsonify(serialize_order(created)), 201
 
 
+@orders_bp.route("/my", methods=["GET"])
+@jwt_required()
+def get_my_orders():
+    customer_id = str(get_jwt_identity())
+
+    query = {
+        "$or": [
+            {"customer.id": customer_id},
+            {"customer.id": ObjectId(customer_id)} if ObjectId.is_valid(customer_id) else {"customer.id": customer_id},
+        ]
+    }
+
+    orders = [serialize_order(order) for order in db.orders.find(query).sort("created_at", -1)]
+    return jsonify(orders), 200
+
+
 @orders_bp.route("/<order_id>", methods=["GET"])
 @jwt_required()
 def get_order_by_id(order_id):
